@@ -1,0 +1,4 @@
+browser_profile/
+page_dump.html
+__pycache__/
+*.pyc
