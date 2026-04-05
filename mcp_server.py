@@ -33,7 +33,7 @@ from screens.upload import get_status as get_upload_status
 MIXAMO_URL = "https://www.mixamo.com"
 PROFILE_DIR = Path(__file__).parent / "browser_profile"
 
-mcp = FastMCP("mixamo")
+mcp = FastMCP("mixamo-mcp")
 
 _pw = None
 _context: BrowserContext | None = None

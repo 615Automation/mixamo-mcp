@@ -2,7 +2,7 @@
   "mcpServers": {
     "mixamo": {
       "command": "python",
-      "args": ["C:\\Users\\vital\\Projects\\mixamo-operator\\mcp_server.py"]
+      "args": ["C:\\Users\\vital\\Projects\\mixamo-mcp\\mcp_server.py"]
     }
   }
 }
