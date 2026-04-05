@@ -7,7 +7,7 @@ import screen_router
 from screens.auth import is_logged_in
 from screens.animations import get_selected_animation, get_character_name, is_t_pose, get_animation_list, search, select_animation, set_checkbox, set_slider
 from screens.download import get_settings as get_download_settings, open_modal, set_format, set_skin, set_fps, confirm as confirm_download
-from screens.upload import upload_file, get_status as get_upload_status, confirm_review, back as upload_back
+from screens.upload import upload_file, get_status as get_upload_status, confirm_review, back as upload_back, close as upload_close
 
 MIXAMO_URL = "https://www.mixamo.com"
 POLL_INTERVAL = 1.0
@@ -26,12 +26,18 @@ _running = False
 # Input thread — only reads stdin, never touches Playwright
 # ---------------------------------------------------------------------------
 
+def read_line() -> str:
+    line = input("> ")
+    while line.count('"') % 2 == 1:
+        line += " " + input("  ")
+    return line
+
+
 def input_loop():
     print("Ready. Type 'help' for commands.")
     try:
         while _running:
-            line = input("> ")
-            handle_input(line)
+            handle_input(read_line())
     except (EOFError, OSError):
         pass
 
@@ -119,10 +125,14 @@ def main():
                     if status.get("state") == "processing":
                         print(f"  Uploading: {status['progress']}% — {status['text']}")
                     elif status.get("state") == "review":
-                        print(f"  Auto-Rigger review ready. Type 'next' to confirm.")
-                        print(f"  {status['text']}")
+                        print("  Auto-Rigger review — confirming.")
+                        confirm_review(page)
                     elif status.get("state") == "change_character":
-                        print(f"  {status['text']} Type 'next' to proceed.")
+                        print("  Change character — confirming.")
+                        confirm_review(page)
+                    elif status.get("state") == "markers":
+                        print("  Meshes without skeletons are not supported.")
+                        upload_close(page)
                     elif status.get("state") == "error":
                         print(f"  Error: {status['text']} Type 'back' to return.")
                     elif status.get("state") == "idle":
@@ -182,7 +192,12 @@ def parse_bool(val: str) -> bool:
 
 def handle_input(line: str):
     global _running
-    parts = line.strip().split()
+    import shlex
+    try:
+        parts = shlex.split(line.strip(), posix=False)
+        parts = [p.strip('"\'') for p in parts]
+    except ValueError:
+        parts = line.strip().split()
     if not parts:
         return
 
@@ -285,11 +300,15 @@ def handle_input(line: str):
         _cmd_queue.put(lambda page: upload_back(page))
         return
 
+    if cmd == "close":
+        _cmd_queue.put(lambda page: upload_close(page))
+        return
+
     if cmd == "upload" and len(parts) >= 2:
         path = " ".join(parts[1:])
         def fn(page, p=path):
             upload_file(page, p)
-            print(f"  Uploaded: {p}")
+            print(f"  Uploading: {p}")
         _cmd_queue.put(fn)
         return
 

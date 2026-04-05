@@ -24,6 +24,9 @@ def get_status(html: str) -> dict:
         status_text = status_el.get_text(strip=True) if status_el else ""
         return {"state": "processing", "progress": progress, "text": status_text}
 
+    if soup.find(class_="autorig-overlay"):
+        return {"state": "markers", "text": "Marker placement required — not supported. Type 'close' to dismiss."}
+
     if soup.find(class_="autorig-holder"):
         info_el = soup.find(class_="autorig-info")
         text = info_el.get_text(" ", strip=True) if info_el else ""
@@ -50,6 +53,11 @@ def confirm_review(page):
 def back(page):
     """Click Back to View page on the skeleton error screen."""
     page.click(".modal-footer button.btn-primary")
+
+
+def close(page):
+    """Click the X button to dismiss the auto-rigger modal."""
+    page.click(".autorig-modal .modal-header button.close")
 
 
 def upload_file(page, path: str):
