@@ -1,8 +1,25 @@
 import re
+from urllib.parse import parse_qs, quote, urlsplit
+
 from bs4 import BeautifulSoup
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from screens.auth import is_logged_in
 
 SCREEN_ID = "animations"
+
+SEARCH_PAGE_URL = "https://www.mixamo.com/#/?page=1&type=Motion%2CMotionPack"
+SEARCH_API_PATH = "/api/v1/products"
+SEARCH_TIMEOUT_MS = 30_000
+
+# True once the clip cards on the page are exactly the given ids. Mixamo leaves the last
+# search's cards up for a while after a new search starts. Packs have their own card type.
+CARDS_MATCH_JS = """(ids) => {
+    const shown = [...document.querySelectorAll('.product-animation .product-image img')]
+        .map(img => (img.src.match(/\\/motions\\/(\\d+)\\//) || [])[1]);
+    return shown.length === ids.length && ids.every(id => shown.includes(id));
+}"""
+
+_last_search = None  # (query, page URL, Mixamo's response)
 
 
 def matches(url: str, html: str) -> bool:
@@ -92,47 +109,120 @@ def get_selected_animation(html: str, page=None) -> dict | None:
 
 # --- List & Navigation ---
 
-def get_animation_list(html: str) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-    for item in soup.find_all(class_="product-animation"):
-        img = item.select_one(".product-image img")
-        name_el = item.find("p", class_="text-capitalize")
-        if not img or not name_el:
+def search_url(query: str = "") -> str:
+    url = SEARCH_PAGE_URL
+    if query:
+        url += f"&query={quote(query, safe='')}"
+    return url
+
+
+def is_search_response(url: str, query: str = "") -> bool:
+    """True if url is the request the page itself makes to search for query."""
+    parts = urlsplit(url)
+    if parts.path != SEARCH_API_PATH:
+        return False
+    params = parse_qs(parts.query, keep_blank_values=True)
+    return (
+        params.get("type") == ["Motion,MotionPack"]
+        and params.get("query", [""])[0].strip().lower() == query.strip().lower()
+    )
+
+
+def parse_search_response(data: dict) -> dict:
+    items, packs = [], []
+    for result in data["results"]:
+        if result["type"] == "MotionPack":
+            packs.append({"name": result["name"], "clips": len(result["motions"] or [])})
             continue
-        m = re.search(r"/motions/(\d+)/", img["src"])
-        selected = "product-selected" in item.get("class", [])
-        results.append({
+        m = re.search(r"/motions/(\d+)/", result["thumbnail"])
+        items.append({
             "id": m.group(1) if m else "",
-            "name": name_el.get_text(strip=True),
-            "selected": selected,
+            "name": result["name"],
+            "description": result["description"],
+            "selected": False,
         })
 
-    # Pagination: "Showing 1-48 of 391 results"
-    page_info = {"page": 1, "per_page": 0, "total": 0, "total_pages": 1}
-    info_el = soup.find(class_="search-description")
-    if info_el:
-        m = re.search(r"Showing (\d+)-(\d+) of (\d+)", info_el.get_text())
-        if m:
-            start, end, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            per_page = end - start + 1
-            page_info = {
-                "page": (start - 1) // per_page + 1,
-                "per_page": per_page,
-                "total": total,
-                "total_pages": -(-total // per_page),  # ceil division
-            }
-
-    return {"items": results, "pagination": page_info}
+    p = data["pagination"]
+    return {
+        "items": items,
+        "packs": packs,
+        "pagination": {"page": p["page"], "total": p["num_results"], "total_pages": p["num_pages"]},
+        "cards_ready": True,
+    }
 
 
-def search(page, query: str = ""):
-    url = "https://www.mixamo.com/#/?page=1&type=Motion%2CMotionPack"
-    if query:
-        url += f"&query={query}"
-    page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_load_state("networkidle")
-    page.wait_for_selector(".product-animation", timeout=15_000)
+def mark_selected(result: dict, html: str):
+    selected = get_selected_animation(html)
+    for item in result["items"]:
+        item["selected"] = bool(selected) and item["id"] == selected["id"]
+
+
+def format_search_results(result: dict, query: str = "") -> list[str]:
+    p = result["pagination"]
+    if p["total"] == 0:
+        return [f"No animations found for {query!r}."]
+
+    lines = [f"Page {p['page']} of {p['total_pages']} ({p['total']} total)"]
+    for a in result["items"]:
+        marker = "*" if a["selected"] else " "
+        description = f" - {a['description']}" if a["description"] else ""
+        lines.append(f"[{marker}] {a['id']}  {a['name']}{description}")
+    for pack in result["packs"]:
+        lines.append(f"[pack] {pack['name']} ({pack['clips']} clips)")
+    if result["packs"]:
+        lines.append("Packs can't be selected with select_animation.")
+    if not result["cards_ready"]:
+        lines.append("Note: the page hasn't finished showing these yet, so select_animation may not find them.")
+    return lines
+
+
+def no_answer_error(query: str) -> RuntimeError:
+    return RuntimeError(
+        f"Mixamo didn't answer the search for {query!r} within {SEARCH_TIMEOUT_MS // 1000} seconds. "
+        "Check the connection and that status shows logged_in: True, then try again."
+    )
+
+
+def refused_error(query: str, status: int) -> RuntimeError:
+    return RuntimeError(f"Mixamo refused the search for {query!r}: HTTP {status}.")
+
+
+def _fetch_search(page, query: str) -> dict:
+    global _last_search
+    # Repeating a search leaves the URL as it is, so the page won't ask Mixamo again.
+    if _last_search and _last_search[:2] == (query, page.url):
+        return _last_search[2]
+
+    url = search_url(query)
+    try:
+        with page.expect_response(
+            lambda r: is_search_response(r.url, query), timeout=SEARCH_TIMEOUT_MS
+        ) as response_info:
+            if page.url == url:  # retrying a search that got no answer
+                page.reload(wait_until="domcontentloaded")
+            else:
+                page.goto(url, wait_until="domcontentloaded")
+        response = response_info.value
+    except PlaywrightTimeoutError:
+        raise no_answer_error(query) from None
+    if not response.ok:
+        raise refused_error(query, response.status)
+
+    data = response.json()
+    _last_search = (query, page.url, data)
+    return data
+
+
+def search(page, query: str = "") -> dict:
+    result = parse_search_response(_fetch_search(page, query))
+    try:
+        page.wait_for_function(
+            CARDS_MATCH_JS, arg=[a["id"] for a in result["items"]], timeout=SEARCH_TIMEOUT_MS, polling=100
+        )
+    except PlaywrightTimeoutError:
+        result["cards_ready"] = False
+    mark_selected(result, page.content())
+    return result
 
 
 def select_animation(page, anim_id: str):

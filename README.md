@@ -62,7 +62,7 @@ Add to your `.mcp.json` (already included in this repo):
 | Tool | Description |
 |---|---|
 | `status()` | Current screen, character, animation, params |
-| `list_animations(query)` | Search animations |
+| `list_animations(query)` | Search animations: IDs, names, descriptions, packs and the real total |
 | `select_animation(id)` | Select animation by ID |
 | `set_param(name, value)` | Set inplace / mirror / overdrive / arm-space / trim |
 | `upload_character(path)` | Upload character to Auto-Rigger |
@@ -80,6 +80,14 @@ Add to your `.mcp.json` (already included in this repo):
 | `fbx_7.4` | FBX 2014 |
 | `fbx_6.1` | FBX 6.1 |
 | `collada` | Collada (.dae) |
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+The tests need no login or network: `tests/fixtures/` holds real search responses from Mixamo.
 
 ## Notes
 

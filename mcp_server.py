@@ -19,13 +19,22 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from screens.auth import is_logged_in
 from screens.animations import (
+    CARDS_MATCH_JS,
+    SEARCH_TIMEOUT_MS,
+    format_search_results,
     get_character_name,
+    is_search_response,
     is_t_pose,
     get_selected_animation,
-    get_animation_list,
+    mark_selected,
+    no_answer_error,
+    parse_search_response,
+    refused_error,
+    search_url,
 )
 from screens.download import get_settings as get_download_settings
 from screens.upload import get_status as get_upload_status
@@ -38,6 +47,7 @@ mcp = FastMCP("mixamo-mcp")
 _pw = None
 _context: BrowserContext | None = None
 _page: Page | None = None
+_last_search: tuple[str, str, dict] | None = None  # query, page URL, Mixamo's response
 
 
 async def _get_page() -> Page:
@@ -67,6 +77,32 @@ async def _html_url(page: Page) -> tuple[str, str]:
     url = await page.evaluate("window.location.href")
     html = await page.content()
     return html, url
+
+
+async def _fetch_search(page: Page, query: str) -> dict:
+    global _last_search
+    # Repeating a search leaves the URL as it is, so the page won't ask Mixamo again.
+    if _last_search and _last_search[:2] == (query, page.url):
+        return _last_search[2]
+
+    url = search_url(query)
+    try:
+        async with page.expect_response(
+            lambda r: is_search_response(r.url, query), timeout=SEARCH_TIMEOUT_MS
+        ) as response_info:
+            if page.url == url:  # retrying a search that got no answer
+                await page.reload(wait_until="domcontentloaded")
+            else:
+                await page.goto(url, wait_until="domcontentloaded")
+        response = await response_info.value
+    except PlaywrightTimeoutError:
+        raise no_answer_error(query) from None
+    if not response.ok:
+        raise refused_error(query, response.status)
+
+    data = await response.json()
+    _last_search = (query, page.url, data)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -128,23 +164,19 @@ async def status() -> str:
 async def list_animations(query: str = "") -> str:
     """
     List animations. Optionally filter by query string.
-    Returns current page of results with IDs and names.
+    Returns the first page of results: each clip's ID, name and Mixamo's description, then
+    any packs. Says so plainly if nothing matches; an error means Mixamo didn't answer.
     """
     page = await _get_page()
-    url = "https://www.mixamo.com/#/?page=1&type=Motion%2CMotionPack"
-    if query:
-        url += f"&query={query}"
-    await page.goto(url, wait_until="domcontentloaded")
-    await page.wait_for_load_state("networkidle")
-    await page.wait_for_selector(".product-animation", timeout=15_000)
-    html = await page.content()
-    result = get_animation_list(html)
-    p = result["pagination"]
-    lines = [f"Page {p['page']} of {p['total_pages']} ({p['total']} total)"]
-    for a in result["items"]:
-        marker = "*" if a["selected"] else " "
-        lines.append(f"[{marker}] {a['id']}  {a['name']}")
-    return "\n".join(lines)
+    result = parse_search_response(await _fetch_search(page, query))
+    try:
+        await page.wait_for_function(
+            CARDS_MATCH_JS, arg=[a["id"] for a in result["items"]], timeout=SEARCH_TIMEOUT_MS, polling=100
+        )
+    except PlaywrightTimeoutError:
+        result["cards_ready"] = False
+    mark_selected(result, await page.content())
+    return "\n".join(format_search_results(result, query))
 
 
 @mcp.tool()

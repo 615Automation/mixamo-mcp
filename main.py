@@ -5,7 +5,7 @@ import queue
 import browser
 import screen_router
 from screens.auth import is_logged_in
-from screens.animations import get_selected_animation, get_character_name, is_t_pose, get_animation_list, search, select_animation, set_checkbox, set_slider
+from screens.animations import get_selected_animation, get_character_name, is_t_pose, format_search_results, search, select_animation, set_checkbox, set_slider
 from screens.download import get_settings as get_download_settings, open_modal, set_format, set_skin, set_fps, confirm as confirm_download
 from screens.upload import upload_file, get_status as get_upload_status, confirm_review, back as upload_back, close as upload_close
 
@@ -271,13 +271,9 @@ def handle_input(line: str):
     if cmd == "list":
         query = " ".join(parts[1:]) if len(parts) >= 2 else ""
         def fn(page, q=query):
-            search(page, q)
-            result = get_animation_list(page.content())
-            p = result["pagination"]
-            print(f"\n  Page {p['page']} of {p['total_pages']} ({p['total']} total)")
-            for a in result["items"]:
-                marker = "*" if a["selected"] else " "
-                print(f"  [{marker}] {a['id']}  {a['name']}")
+            print()
+            for line in format_search_results(search(page, q), q):
+                print(f"  {line}")
         _cmd_queue.put(fn)
         return
 
